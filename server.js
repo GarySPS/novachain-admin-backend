@@ -1,9 +1,12 @@
+//server.js
+
 const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
 require('dotenv').config();
 console.log("LOADED ADMIN_PASSWORD:", process.env.ADMIN_PASSWORD);
+const bcrypt = require('bcrypt');
 const pool = require('./db');
 const path = require('path');
 const multer = require('multer');
@@ -16,6 +19,7 @@ const fs = require('fs');
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@novachain.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'SuperSecret123';
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret';
+const BCRYPT_ROUNDS = 10;
 
 const MAIN_BACKEND_URL = 'https://novachain-backend.onrender.com';
 
@@ -48,6 +52,46 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, '../../novachain-backend/uploads')));
 
+// ===== NEW: Seed Admin Users from .env into DB =====
+const seedAdmins = async () => {
+  console.log('Checking admin accounts...');
+  const adminsToSeed = [
+    {
+      email: process.env.ADMIN_EMAIL,
+      password: process.env.ADMIN_PASSWORD,
+      role: 'superadmin'
+    },
+    {
+      email: process.env.SUPPORT_EMAIL,
+      password: process.env.SUPPORT_PASSWORD,
+      role: 'support'
+    }
+  ];
+
+  for (const admin of adminsToSeed) {
+    if (!admin.email || !admin.password) continue;
+
+    try {
+      // Check if admin already exists
+      const { rows } = await pool.query('SELECT * FROM admin_users WHERE email = $1', [admin.email]);
+      
+      if (rows.length === 0) {
+        // Admin doesn't exist, create them
+        const password_hash = await bcrypt.hash(admin.password, BCRYPT_ROUNDS);
+        await pool.query(
+          'INSERT INTO admin_users (email, password_hash, role) VALUES ($1, $2, $3)',
+          [admin.email, password_hash, admin.role]
+        );
+        console.log(`Created admin user: ${admin.email}`);
+      }
+    } catch (err) {
+      console.error(`Failed to seed admin ${admin.email}:`, err.message);
+    }
+  }
+};
+// Run seeder on startup
+seedAdmins();
+
 // ===== JWT admin auth middleware =====
 function requireAdminAuth(req, res, next) {
   const token = req.headers.authorization && req.headers.authorization.split(' ')[1];
@@ -69,20 +113,6 @@ function requireSuperAdmin(req, res, next) {
   }
   next();
 }
-
-// ===== List of admins =====
-const ADMINS = [
-  {
-    email: process.env.ADMIN_EMAIL || 'admin@novachain.com',
-    password: process.env.ADMIN_PASSWORD || 'SuperSecret123',
-    role: 'superadmin', // can access everything
-  },
-  {
-    email: process.env.SUPPORT_EMAIL || 'support@novachain.com',
-    password: process.env.SUPPORT_PASSWORD || 'Support123',
-    role: 'support', // cannot use deposit settings
-  },
-];
 
 // ====== PROXY ROUTES (no change) ======
 app.get('/api/trades', requireAdminAuth, async (req, res) => {
@@ -122,14 +152,72 @@ app.get('/api/withdrawals', requireAdminAuth, async (req, res) => {
 // ===== NORMAL ADMIN CONTROLS (NOT PROXIED) =====
 
 // --- Admin login
-app.post('/api/admin/login', (req, res) => {
+app.post('/api/admin/login', async (req, res) => {
   const { email, password } = req.body;
-  const admin = ADMINS.find(a => a.email === email && a.password === password);
-  if (!admin) {
-    return res.status(401).json({ message: 'Invalid email or password' });
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email and password are required' });
   }
-  const token = jwt.sign({ email: admin.email, role: admin.role }, JWT_SECRET, { expiresIn: '1h' });
-  res.json({ token, role: admin.role }); // send role to frontend too!
+
+  try {
+    const { rows } = await pool.query('SELECT * FROM admin_users WHERE email = $1', [email]);
+    const admin = rows[0];
+
+    // Check if admin exists and password is correct
+    if (!admin || !(await bcrypt.compare(password, admin.password_hash))) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+
+    // Password is correct, issue token
+    const token = jwt.sign({ email: admin.email, role: admin.role }, JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token, role: admin.role }); // send role to frontend too!
+
+  } catch (err) {
+    console.error('Login error:', err.message);
+    res.status(500).json({ message: 'Server error during login' });
+  }
+});
+
+// --- Admin Change Password
+app.post('/api/admin/change-password', requireAdminAuth, async (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+  const adminEmail = req.adminEmail; // From requireAdminAuth middleware
+
+  if (!oldPassword || !newPassword) {
+    return res.status(400).json({ message: 'Old and new passwords are required' });
+  }
+  
+  if (newPassword.length < 6) {
+     return res.status(400).json({ message: 'New password must be at least 6 characters' });
+  }
+
+  try {
+    // 1. Get current user from DB
+    const { rows } = await pool.query('SELECT * FROM admin_users WHERE email = $1', [adminEmail]);
+    const admin = rows[0];
+
+    if (!admin) {
+      return res.status(404).json({ message: 'Admin user not found' });
+    }
+
+    // 2. Check if old password is correct
+    const isMatch = await bcrypt.compare(oldPassword, admin.password_hash);
+    if (!isMatch) {
+      return res.status(401).json({ message: 'Incorrect old password' });
+    }
+
+    // 3. Hash and update new password
+    const new_password_hash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    await pool.query(
+      'UPDATE admin_users SET password_hash = $1 WHERE email = $2',
+      [new_password_hash, adminEmail]
+    );
+
+    res.json({ message: 'Password changed successfully' });
+
+  } catch (err) {
+    console.error('Change password error:', err.message);
+    res.status(500).json({ message: 'Server error changing password' });
+  }
 });
 
 // --- RESTRICTED: Wallet Settings (Deposit Address) Routes ---
