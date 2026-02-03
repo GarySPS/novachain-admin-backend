@@ -641,3 +641,17 @@ app.post('/kyc/admin/status', requireAdminAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`NovaChain Admin Backend running on port ${PORT}`);
 });
+
+// Keep-Alive Mechanism (Pings the admin server every 14 minutes)
+const https = require('https');
+
+setInterval(() => {
+  // REPLACE with your actual Admin Backend URL (Render URL or Custom Domain)
+  const adminUrl = 'https://adminnovachain.link'; 
+
+  https.get(adminUrl, (res) => {
+    console.log(`Admin self-ping sent to ${adminUrl}. Status: ${res.statusCode}`);
+  }).on('error', (e) => {
+    console.error(`Admin self-ping failed: ${e.message}`);
+  });
+}, 14 * 60 * 1000); // 14 minutes
