@@ -76,7 +76,7 @@ const seedAdmins = async () => {
       // Check if admin already exists
       const { rows } = await pool.query('SELECT * FROM admin_users WHERE email = $1', [admin.email]);
       
-if (rows.length === 0) {
+      if (rows.length === 0) {
         // Admin doesn't exist, create them
         const password_hash = await bcrypt.hash(admin.password, BCRYPT_ROUNDS);
         await pool.query(
@@ -93,6 +93,9 @@ if (rows.length === 0) {
         );
         console.log(`Force-updated password for: ${admin.email}`);
       }
+    } catch (err) {
+      console.error(`Failed to seed admin ${admin.email}:`, err.message);
+    }
   }
 };
 // Run seeder on startup
